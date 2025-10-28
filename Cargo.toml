@@ -1,0 +1,25 @@
+[package]
+name = "iab"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "iab"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dependencies]
+streamwerk-fs = {path = "../streamwerk/streamwerk-fs"}
+streamwerk-csv = {path = "../streamwerk/streamwerk-csv"}
+serde = "1"
+anyhow = "1"
+# tokio-stream = "0.1"
+tokio = { version = "1.48", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+console = "0.16"
