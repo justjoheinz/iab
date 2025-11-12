@@ -1,91 +1,47 @@
 use anyhow::*;
-use clap::Parser;
-use console::style;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
+};
+use ratatui::{
+    prelude::*,
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table},
+};
 use serde::{Deserialize, Serialize};
-use streamwerk_csv::prelude::*;
-use streamwerk_fs::prelude::*;
+use std::io::{stdout, Stdout};
 
 const PRODUCT_TSV: &str = include_str!("../product-2.0.tsv");
 const CONTENT_TSV: &str = include_str!("../content-3.1.tsv");
 const AUDIENCE_TSV: &str = include_str!("../audience-1.1.tsv");
 
-#[derive(Parser, Debug)]
-#[command(name = "iab")]
-#[command(about = "IAB taxonomy pipeline processor", long_about = None)]
-#[command(version = version_string())]
-struct Cli {
-    /// Process product pipeline
-    #[arg(short, long)]
-    product: bool,
-
-    /// Process content pipeline
-    #[arg(short, long)]
-    content: bool,
-
-    /// Process audience pipeline
-    #[arg(short, long)]
-    audience: bool,
-
-    /// Filter by unique ID
-    #[arg(short, long, conflicts_with_all = ["parent", "name"])]
-    id: Option<String>,
-
-    /// Filter by parent ID
-    #[arg(short = 't', long, conflicts_with_all = ["id", "name"])]
-    parent: Option<String>,
-
-    /// Filter by name (case-insensitive substring match)
-    #[arg(short, long, conflicts_with_all = ["id", "parent"])]
-    name: Option<String>,
-}
-
-fn version_string() -> &'static str {
-    concat!(
-        env!("CARGO_PKG_VERSION"),
-        "\nProduct: 2.0",
-        "\nContent: 3.1",
-        "\nAudience: 1.1",
-        "\n",
-        "\nhttps://github.com/InteractiveAdvertisingBureau/Taxonomies"
-    )
-}
-
+// Data structures
 trait TaxonomyItem {
     fn unique_id(&self) -> &str;
     fn parent(&self) -> Option<&str>;
     fn name(&self) -> &str;
-}
-
-#[derive(Clone, Copy)]
-enum Filter<'a> {
-    Id(&'a str),
-    Parent(&'a str),
-    Name(&'a str),
-}
-
-fn matches_filter<T: TaxonomyItem>(item: &T, filter: &Filter) -> bool {
-    match filter {
-        Filter::Id(id) => item.unique_id() == *id,
-        Filter::Parent(parent_id) => {
-            item.parent() == Some(parent_id) || item.unique_id() == *parent_id
-        }
-        Filter::Name(name) => {
-            let item_name_lower = item.name().to_lowercase();
-            let filter_lower = name.to_lowercase();
-            item_name_lower.contains(&filter_lower)
-        }
-    }
+    fn tiers(&self) -> Vec<&str>;
+    fn extension(&self) -> Option<&str>;
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Content {
+    #[serde(rename = "Unique ID")]
     unique_id: String,
+    #[serde(rename = "Parent")]
     parent: Option<String>,
+    #[serde(rename = "Name")]
     name: String,
+    #[serde(rename = "Tier 1")]
     tier_1: Option<String>,
+    #[serde(rename = "Tier 2")]
     tier_2: Option<String>,
+    #[serde(rename = "Tier 3")]
     tier_3: Option<String>,
+    #[serde(rename = "Tier 4")]
     tier_4: Option<String>,
+    #[serde(rename = "Extension")]
     ext: Option<String>,
 }
 
@@ -99,11 +55,8 @@ impl TaxonomyItem for Content {
     fn name(&self) -> &str {
         &self.name
     }
-}
-
-impl std::fmt::Display for Content {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tiers: Vec<&str> = [
+    fn tiers(&self) -> Vec<&str> {
+        [
             self.tier_1.as_deref(),
             self.tier_2.as_deref(),
             self.tier_3.as_deref(),
@@ -111,32 +64,44 @@ impl std::fmt::Display for Content {
         ]
         .iter()
         .filter_map(|&t| t.filter(|s| !s.is_empty()))
-        .collect();
-
-        write!(
-            f,
-            "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n",
-            style("Unique ID").bold().cyan(),
-            self.unique_id,
-            style("Parent ID").bold().cyan(),
-            self.parent.as_deref().unwrap_or_default(),
-            style("Name").bold().cyan(),
-            self.name,
-            style("Tiers").bold().cyan(),
-            tiers.join(" | "),
-            style("Extension").bold().cyan(),
-            self.ext.as_deref().unwrap_or_default()
-        )
+        .collect()
+    }
+    fn extension(&self) -> Option<&str> {
+        self.ext.as_deref()
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+impl TaxonomyItem for &Content {
+    fn unique_id(&self) -> &str {
+        (*self).unique_id()
+    }
+    fn parent(&self) -> Option<&str> {
+        (*self).parent()
+    }
+    fn name(&self) -> &str {
+        (*self).name()
+    }
+    fn tiers(&self) -> Vec<&str> {
+        (*self).tiers()
+    }
+    fn extension(&self) -> Option<&str> {
+        (*self).extension()
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct Product {
+    #[serde(rename = "Unique ID")]
     unique_id: String,
+    #[serde(rename = "Parent ID")]
     parent: Option<String>,
+    #[serde(rename = "Name")]
     name: String,
+    #[serde(rename = "Tier 1")]
     tier_1: Option<String>,
+    #[serde(rename = "Tier 2")]
     tier_2: Option<String>,
+    #[serde(rename = "Tier 3")]
     tier_3: Option<String>,
 }
 
@@ -150,44 +115,60 @@ impl TaxonomyItem for Product {
     fn name(&self) -> &str {
         &self.name
     }
-}
-
-impl std::fmt::Display for Product {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tiers: Vec<&str> = [
+    fn tiers(&self) -> Vec<&str> {
+        [
             self.tier_1.as_deref(),
             self.tier_2.as_deref(),
             self.tier_3.as_deref(),
         ]
         .iter()
         .filter_map(|&t| t.filter(|s| !s.is_empty()))
-        .collect();
-
-        write!(
-            f,
-            "{}: {}\n{}: {}\n{}: {}\n{}: {}\n",
-            style("Unique ID").bold().yellow(),
-            self.unique_id,
-            style("Parent ID").bold().yellow(),
-            self.parent.as_deref().unwrap_or_default(),
-            style("Name").bold().yellow(),
-            self.name,
-            style("Tiers").bold().yellow(),
-            tiers.join(" | "),
-        )
+        .collect()
+    }
+    fn extension(&self) -> Option<&str> {
+        None
     }
 }
-#[derive(Serialize, Deserialize, Default, Debug)]
+
+impl TaxonomyItem for &Product {
+    fn unique_id(&self) -> &str {
+        (*self).unique_id()
+    }
+    fn parent(&self) -> Option<&str> {
+        (*self).parent()
+    }
+    fn name(&self) -> &str {
+        (*self).name()
+    }
+    fn tiers(&self) -> Vec<&str> {
+        (*self).tiers()
+    }
+    fn extension(&self) -> Option<&str> {
+        (*self).extension()
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct Audience {
+    #[serde(rename = "Unique ID")]
     unique_id: String,
+    #[serde(rename = "Parent ID")]
     parent: Option<String>,
+    #[serde(rename = "Condensed Name (1st, 2nd, Last Tier)")]
     name: String,
+    #[serde(rename = "Tier 1")]
     tier_1: Option<String>,
+    #[serde(rename = "Tier 2")]
     tier_2: Option<String>,
+    #[serde(rename = "Tier 3")]
     tier_3: Option<String>,
+    #[serde(rename = "Tier 4")]
     tier_4: Option<String>,
+    #[serde(rename = "Tier 5")]
     tier_5: Option<String>,
+    #[serde(rename = "Tier 6")]
     tier_6: Option<String>,
+    #[serde(rename = "*Extension Notes")]
     ext: Option<String>,
 }
 
@@ -201,11 +182,8 @@ impl TaxonomyItem for Audience {
     fn name(&self) -> &str {
         &self.name
     }
-}
-
-impl std::fmt::Display for Audience {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tiers: Vec<&str> = [
+    fn tiers(&self) -> Vec<&str> {
+        [
             self.tier_1.as_deref(),
             self.tier_2.as_deref(),
             self.tier_3.as_deref(),
@@ -215,94 +193,612 @@ impl std::fmt::Display for Audience {
         ]
         .iter()
         .filter_map(|&t| t.filter(|s| !s.is_empty()))
-        .collect();
-
-        write!(
-            f,
-            "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n",
-            style("Unique ID").bold().red(),
-            self.unique_id,
-            style("Parent ID").bold().red(),
-            self.parent.as_deref().unwrap_or_default(),
-            style("Name").bold().red(),
-            self.name,
-            style("Tiers").bold().red(),
-            tiers.join(" | "),
-            style("Extension").bold().red(),
-            self.ext.as_deref().unwrap_or_default()
-        )
+        .collect()
+    }
+    fn extension(&self) -> Option<&str> {
+        self.ext.as_deref()
     }
 }
 
-fn extract_lines(input: &str) -> Result<impl Stream<Item = Result<String>> + Send> {
-    let lines: Vec<String> = input.lines().map(String::from).collect();
-    Ok(iter_ok(lines))
+impl TaxonomyItem for &Audience {
+    fn unique_id(&self) -> &str {
+        (*self).unique_id()
+    }
+    fn parent(&self) -> Option<&str> {
+        (*self).parent()
+    }
+    fn name(&self) -> &str {
+        (*self).name()
+    }
+    fn tiers(&self) -> Vec<&str> {
+        (*self).tiers()
+    }
+    fn extension(&self) -> Option<&str> {
+        (*self).extension()
+    }
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
+// Datasource enum
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Datasource {
+    Product,
+    Content,
+    Audience,
+}
 
-    // Determine pipeline
-    let pipeline_count = [cli.product, cli.content, cli.audience]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
-    if pipeline_count == 0 {
-        eprintln!("Error: Must specify one of --product, --content, or --audience");
-        std::process::exit(1);
+impl Datasource {
+    fn next(self) -> Self {
+        match self {
+            Datasource::Product => Datasource::Content,
+            Datasource::Content => Datasource::Audience,
+            Datasource::Audience => Datasource::Product,
+        }
     }
 
-    if pipeline_count > 1 {
-        eprintln!("Error: Can only specify one pipeline at a time");
-        std::process::exit(1);
+    fn previous(self) -> Self {
+        match self {
+            Datasource::Product => Datasource::Audience,
+            Datasource::Content => Datasource::Product,
+            Datasource::Audience => Datasource::Content,
+        }
     }
 
-    // Determine filter
-    let filter = if let Some(id) = &cli.id {
-        Filter::Id(id)
-    } else if let Some(parent) = &cli.parent {
-        Filter::Parent(parent)
-    } else if let Some(name) = &cli.name {
-        Filter::Name(name)
+    fn color(self) -> Color {
+        match self {
+            Datasource::Product => Color::Yellow,
+            Datasource::Content => Color::Cyan,
+            Datasource::Audience => Color::Red,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Datasource::Product => "Product",
+            Datasource::Content => "Content",
+            Datasource::Audience => "Audience",
+        }
+    }
+}
+
+// Data loading functions
+fn load_products() -> Result<Vec<Product>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_reader(PRODUCT_TSV.as_bytes());
+
+    let mut items = Vec::new();
+    for result in reader.deserialize() {
+        items.push(result?);
+    }
+
+    Ok(items)
+}
+
+fn load_content() -> Result<Vec<Content>> {
+    let mut lines = CONTENT_TSV.lines();
+    // Skip first line (section header)
+    lines.next();
+
+    // Keep second line (actual column headers) and all data lines
+    let remaining_content = lines.collect::<Vec<_>>().join("\n");
+
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_reader(remaining_content.as_bytes());
+
+    let mut items = Vec::new();
+    for result in reader.deserialize() {
+        items.push(result?);
+    }
+
+    Ok(items)
+}
+
+fn load_audience() -> Result<Vec<Audience>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(true)
+        .from_reader(AUDIENCE_TSV.as_bytes());
+
+    let mut items = Vec::new();
+    for result in reader.deserialize() {
+        items.push(result?);
+    }
+
+    Ok(items)
+}
+
+// App state
+struct App {
+    datasource: Datasource,
+    filter_input: String,
+    products: Vec<Product>,
+    content: Vec<Content>,
+    audience: Vec<Audience>,
+    selected_index: usize,
+    scroll_offset: usize,
+    show_popup: bool,
+    popup_content: Vec<(String, String)>,
+}
+
+impl App {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            datasource: Datasource::Product,
+            filter_input: String::new(),
+            products: load_products()?,
+            content: load_content()?,
+            audience: load_audience()?,
+            selected_index: 0,
+            scroll_offset: 0,
+            show_popup: false,
+            popup_content: Vec::new(),
+        })
+    }
+
+    fn switch_datasource(&mut self, datasource: Datasource) {
+        self.datasource = datasource;
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+    }
+
+    fn filtered_items(&self) -> Vec<Vec<String>> {
+        let filter_lower = self.filter_input.to_lowercase();
+
+        match self.datasource {
+            Datasource::Product => self
+                .products
+                .iter()
+                .filter(|item| self.matches_all_fields(item, &filter_lower))
+                .map(|item| self.format_item_as_row(item))
+                .collect(),
+            Datasource::Content => self
+                .content
+                .iter()
+                .filter(|item| self.matches_all_fields(item, &filter_lower))
+                .map(|item| self.format_item_as_row(item))
+                .collect(),
+            Datasource::Audience => self
+                .audience
+                .iter()
+                .filter(|item| self.matches_all_fields(item, &filter_lower))
+                .map(|item| self.format_item_as_row(item))
+                .collect(),
+        }
+    }
+
+    fn matches_all_fields<T: TaxonomyItem + ?Sized>(&self, item: &T, filter_lower: &str) -> bool {
+        if filter_lower.is_empty() {
+            return true;
+        }
+
+        // Search in unique_id
+        if item.unique_id().to_lowercase().contains(filter_lower) {
+            return true;
+        }
+
+        // Search in parent
+        if let Some(parent) = item.parent() {
+            if parent.to_lowercase().contains(filter_lower) {
+                return true;
+            }
+        }
+
+        // Search in name
+        if item.name().to_lowercase().contains(filter_lower) {
+            return true;
+        }
+
+        // Search in tiers
+        for tier in item.tiers() {
+            if tier.to_lowercase().contains(filter_lower) {
+                return true;
+            }
+        }
+
+        // Search in extension
+        if let Some(ext) = item.extension() {
+            if ext.to_lowercase().contains(filter_lower) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn format_item_as_row<T: TaxonomyItem>(&self, item: &T) -> Vec<String> {
+        let tiers = item.tiers().join(" > ");
+        let parent = item.parent().unwrap_or("").to_string();
+        let ext = item.extension().unwrap_or("").to_string();
+
+        vec![
+            item.unique_id().to_string(),
+            parent,
+            item.name().to_string(),
+            tiers,
+            ext,
+        ]
+    }
+
+    fn column_headers(&self) -> Vec<&str> {
+        match self.datasource {
+            Datasource::Product => vec!["ID", "Parent", "Name", "Tiers", ""],
+            Datasource::Content => vec!["ID", "Parent", "Name", "Tiers", "Ext"],
+            Datasource::Audience => vec!["ID", "Parent", "Name", "Tiers", "Ext"],
+        }
+    }
+
+    fn column_widths(&self) -> Vec<Constraint> {
+        vec![
+            Constraint::Length(10),  // ID
+            Constraint::Length(10),  // Parent
+            Constraint::Min(20),     // Name (flexible)
+            Constraint::Min(20),     // Tiers (flexible)
+            Constraint::Length(10),  // Extension
+        ]
+    }
+
+    fn show_item_details(&mut self) {
+        let filter_lower = self.filter_input.to_lowercase();
+
+        let details = match self.datasource {
+            Datasource::Product => {
+                let filtered: Vec<&Product> = self.products
+                    .iter()
+                    .filter(|item| self.matches_all_fields(*item, &filter_lower))
+                    .collect();
+
+                if let Some(item) = filtered.get(self.selected_index) {
+                    self.format_item_details(item)
+                } else {
+                    return;
+                }
+            }
+            Datasource::Content => {
+                let filtered: Vec<&Content> = self.content
+                    .iter()
+                    .filter(|item| self.matches_all_fields(*item, &filter_lower))
+                    .collect();
+
+                if let Some(item) = filtered.get(self.selected_index) {
+                    self.format_item_details(item)
+                } else {
+                    return;
+                }
+            }
+            Datasource::Audience => {
+                let filtered: Vec<&Audience> = self.audience
+                    .iter()
+                    .filter(|item| self.matches_all_fields(*item, &filter_lower))
+                    .collect();
+
+                if let Some(item) = filtered.get(self.selected_index) {
+                    self.format_item_details(item)
+                } else {
+                    return;
+                }
+            }
+        };
+
+        self.popup_content = details;
+        self.show_popup = true;
+    }
+
+    fn format_item_details<T: TaxonomyItem>(&self, item: &T) -> Vec<(String, String)> {
+        let mut details = vec![
+            ("Unique ID".to_string(), item.unique_id().to_string()),
+            ("Parent ID".to_string(), item.parent().unwrap_or("").to_string()),
+            ("Name".to_string(), item.name().to_string()),
+        ];
+
+        let tiers = item.tiers();
+        for (i, tier) in tiers.iter().enumerate() {
+            details.push((format!("Tier {}", i + 1), tier.to_string()));
+        }
+
+        if let Some(ext) = item.extension() {
+            if !ext.is_empty() {
+                details.push(("Extension".to_string(), ext.to_string()));
+            }
+        }
+
+        details
+    }
+
+    fn update_scroll(&mut self, viewport_height: usize) {
+        // Ensure selected item is visible within viewport
+        if self.selected_index < self.scroll_offset {
+            // Scrolling up
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + viewport_height {
+            // Scrolling down
+            self.scroll_offset = self.selected_index.saturating_sub(viewport_height - 1);
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, viewport_height: usize) -> bool {
+        // Handle popup-specific keys first
+        if self.show_popup {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.show_popup = false;
+                    return key.code != KeyCode::Char('q');
+                }
+                _ => return true,
+            }
+        }
+
+        // Handle normal navigation
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => return false,
+            KeyCode::Enter => {
+                self.show_item_details();
+            }
+            KeyCode::Tab => {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.switch_datasource(self.datasource.previous());
+                } else {
+                    self.switch_datasource(self.datasource.next());
+                }
+            }
+            KeyCode::Char(c) => {
+                self.filter_input.push(c);
+                self.selected_index = 0;
+                self.scroll_offset = 0;
+            }
+            KeyCode::Backspace => {
+                self.filter_input.pop();
+                self.selected_index = 0;
+                self.scroll_offset = 0;
+            }
+            KeyCode::Down => {
+                let item_count = self.filtered_items().len();
+                if item_count > 0 && self.selected_index < item_count - 1 {
+                    self.selected_index += 1;
+                    self.update_scroll(viewport_height);
+                }
+            }
+            KeyCode::Up => {
+                if self.selected_index > 0 {
+                    self.selected_index -= 1;
+                    self.update_scroll(viewport_height);
+                }
+            }
+            KeyCode::PageDown => {
+                let item_count = self.filtered_items().len();
+                if item_count > 0 {
+                    self.selected_index = (self.selected_index + 10).min(item_count - 1);
+                    self.update_scroll(viewport_height);
+                }
+            }
+            KeyCode::PageUp => {
+                self.selected_index = self.selected_index.saturating_sub(10);
+                self.update_scroll(viewport_height);
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+// TUI rendering
+fn ui(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    // Split into sections: header, filter, list, help
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header with datasource tabs
+            Constraint::Length(3), // Filter input
+            Constraint::Min(0),     // List
+            Constraint::Length(1),  // Help bar
+        ])
+        .split(area);
+
+    // Header with datasource tabs
+    let header_text = format!(
+        " {} | {} | {} ",
+        if app.datasource == Datasource::Product {
+            format!(">> {} <<", Datasource::Product.name())
+        } else {
+            Datasource::Product.name().to_string()
+        },
+        if app.datasource == Datasource::Content {
+            format!(">> {} <<", Datasource::Content.name())
+        } else {
+            Datasource::Content.name().to_string()
+        },
+        if app.datasource == Datasource::Audience {
+            format!(">> {} <<", Datasource::Audience.name())
+        } else {
+            Datasource::Audience.name().to_string()
+        }
+    );
+
+    let header = Paragraph::new(header_text)
+        .style(Style::default().fg(app.datasource.color()).bold())
+        .block(Block::default().borders(Borders::ALL).title("Datasource"));
+
+    frame.render_widget(header, chunks[0]);
+
+    // Filter input
+    let filter_text = if app.filter_input.is_empty() {
+        "Type to filter...".to_string()
     } else {
-        eprintln!("Error: Must specify one of --id, --parent, or --name");
-        std::process::exit(1);
+        app.filter_input.clone()
     };
 
-    if cli.product {
-        let transform_product = CsvDeserializer::with_config(CsvConfig::tsv())
-            .filter(move |product: &Product| matches_filter(product, &filter))
-            .map(|product: Product| product.to_string());
+    let filter = Paragraph::new(filter_text)
+        .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL).title("Filter"));
 
-        let pipeline_product = EtlPipeline::new(
-            FnExtract(extract_lines).skip(1),
-            transform_product,
-            StdoutLoad,
-        );
-        pipeline_product.run(PRODUCT_TSV).await.unwrap();
-    } else if cli.content {
-        let transform_content = CsvDeserializer::with_config(CsvConfig::tsv())
-            .filter(move |content: &Content| matches_filter(content, &filter))
-            .map(|content: Content| content.to_string());
+    frame.render_widget(filter, chunks[1]);
 
-        let pipeline_content = EtlPipeline::new(
-            FnExtract(extract_lines).skip(2),
-            transform_content,
-            StdoutLoad,
-        );
-        pipeline_content.run(CONTENT_TSV).await.unwrap();
-    } else if cli.audience {
-        let transform_audience = CsvDeserializer::with_config(CsvConfig::tsv())
-            .filter(move |audience: &Audience| matches_filter(audience, &filter))
-            .map(|audience: Audience| audience.to_string());
+    // Table of filtered items
+    let filtered = app.filtered_items();
+    let total_count = filtered.len();
 
-        let pipeline_audience = EtlPipeline::new(
-            FnExtract(extract_lines).skip(1),
-            transform_audience,
-            StdoutLoad,
-        );
-        pipeline_audience.run(AUDIENCE_TSV).await.unwrap();
+    let headers = app.column_headers();
+    let header_cells: Vec<Cell> = headers
+        .iter()
+        .map(|h| Cell::from(*h).style(Style::default().fg(app.datasource.color()).bold()))
+        .collect();
+    let header = Row::new(header_cells)
+        .style(Style::default().bg(Color::DarkGray))
+        .height(1);
+
+    // Calculate viewport height (table area minus borders and header)
+    let table_height = chunks[2].height.saturating_sub(3); // 2 for borders, 1 for header
+    let viewport_end = (app.scroll_offset + table_height as usize).min(total_count);
+
+    // Only show rows within the viewport
+    let rows: Vec<Row> = filtered
+        .into_iter()
+        .enumerate()
+        .skip(app.scroll_offset)
+        .take(table_height as usize)
+        .map(|(i, row_data)| {
+            let cells: Vec<Cell> = row_data.into_iter().map(|c| Cell::from(c)).collect();
+            let style = if i == app.selected_index {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Row::new(cells).style(style).height(1)
+        }).collect();
+
+    let title = if total_count == 0 {
+        "Results (0 items)".to_string()
+    } else {
+        format!("Results ({} items, showing {}-{})", total_count, app.scroll_offset + 1, viewport_end)
+    };
+
+    let table = Table::new(rows, app.column_widths())
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title),
+        )
+        .column_spacing(1);
+
+    frame.render_widget(table, chunks[2]);
+
+    // Help bar
+    let help_text = if app.show_popup {
+        "ESC/Enter: Close | q: Quit"
+    } else {
+        "Tab/Shift+Tab: Switch datasource | ↑↓: Navigate | Enter: View details | ESC/q: Quit"
+    };
+    let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
+
+    frame.render_widget(help, chunks[3]);
+
+    // Render popup if active
+    if app.show_popup {
+        render_popup(frame, app);
     }
+}
+
+fn render_popup(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+
+    // Create centered popup (60% width, 80% height)
+    let popup_width = (area.width * 60) / 100;
+    let popup_height = (area.height * 80) / 100;
+    let popup_x = (area.width - popup_width) / 2;
+    let popup_y = (area.height - popup_height) / 2;
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the background
+    frame.render_widget(Clear, popup_area);
+
+    // Render the popup block
+    let block = Block::default()
+        .title(format!(" {} Details ", app.datasource.name()))
+        .borders(Borders::ALL)
+        .style(Style::default().bg(Color::Black).fg(app.datasource.color()));
+
+    frame.render_widget(block, popup_area);
+
+    // Render the content
+    let inner_area = Rect {
+        x: popup_area.x + 2,
+        y: popup_area.y + 2,
+        width: popup_area.width.saturating_sub(4),
+        height: popup_area.height.saturating_sub(3),
+    };
+
+    let mut lines = Vec::new();
+    for (label, value) in &app.popup_content {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}: ", label),
+                Style::default().fg(app.datasource.color()).bold(),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {}", value),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        lines.push(Line::from("")); // Empty line for spacing
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .style(Style::default().bg(Color::Black))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+
+    frame.render_widget(paragraph, inner_area);
+}
+
+fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> Result<()> {
+    loop {
+        terminal.draw(|frame| ui(frame, &app))?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    // Calculate viewport height: terminal height minus header(3), filter(3), help(1), borders
+                    let terminal_height = terminal.size()?.height;
+                    let viewport_height = terminal_height.saturating_sub(7 + 3) as usize; // 7 for UI chrome, 3 for table borders/header
+
+                    if !app.handle_key(key, viewport_height) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    // Initialize terminal
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+
+    // Load data and create app
+    let app = App::new()?;
+
+    // Run TUI
+    let result = run_app(&mut terminal, app);
+
+    // Cleanup terminal
+    disable_raw_mode()?;
+    stdout().execute(LeaveAlternateScreen)?;
+
+    result
 }
