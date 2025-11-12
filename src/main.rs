@@ -7,7 +7,7 @@ use crossterm::{
 use ratatui::{
     prelude::*,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Tabs},
 };
 use serde::{Deserialize, Serialize};
 use std::io::{stdout, Stdout};
@@ -258,6 +258,14 @@ impl Datasource {
             Datasource::Audience => "Audience",
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            Datasource::Product => 0,
+            Datasource::Content => 1,
+            Datasource::Audience => 2,
+        }
+    }
 }
 
 // Data loading functions
@@ -377,14 +385,14 @@ impl App {
             return true;
         }
 
-        // Search in unique_id
-        if item.unique_id().to_lowercase().contains(filter_lower) {
+        // Search in unique_id (starts with)
+        if item.unique_id().to_lowercase().starts_with(filter_lower) {
             return true;
         }
 
-        // Search in parent
+        // Search in parent (starts with)
         if let Some(parent) = item.parent() {
-            if parent.to_lowercase().contains(filter_lower) {
+            if parent.to_lowercase().starts_with(filter_lower) {
                 return true;
             }
         }
@@ -611,30 +619,14 @@ fn ui(frame: &mut Frame, app: &App) {
         .split(area);
 
     // Header with datasource tabs
-    let header_text = format!(
-        " {} | {} | {} ",
-        if app.datasource == Datasource::Product {
-            format!(">> {} <<", Datasource::Product.name())
-        } else {
-            Datasource::Product.name().to_string()
-        },
-        if app.datasource == Datasource::Content {
-            format!(">> {} <<", Datasource::Content.name())
-        } else {
-            Datasource::Content.name().to_string()
-        },
-        if app.datasource == Datasource::Audience {
-            format!(">> {} <<", Datasource::Audience.name())
-        } else {
-            Datasource::Audience.name().to_string()
-        }
-    );
+    let tabs = Tabs::new(vec!["Product", "Content", "Audience"])
+        .block(Block::default().borders(Borders::ALL).title("Datasource"))
+        .select(app.datasource.index())
+        .style(Style::default().fg(Color::Gray))
+        .highlight_style(Style::default().fg(app.datasource.color()).bold())
+        .divider("|");
 
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(app.datasource.color()).bold())
-        .block(Block::default().borders(Borders::ALL).title("Datasource"));
-
-    frame.render_widget(header, chunks[0]);
+    frame.render_widget(tabs, chunks[0]);
 
     // Filter input
     let filter_text = if app.filter_input.is_empty() {
