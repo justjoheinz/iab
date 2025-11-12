@@ -7,7 +7,7 @@ use crossterm::{
 use ratatui::{
     prelude::*,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table},
 };
 use serde::{Deserialize, Serialize};
 use std::io::{stdout, Stdout};
@@ -319,6 +319,7 @@ struct App {
     audience: Vec<Audience>,
     selected_index: usize,
     scroll_offset: usize,
+    scrollbar_state: ScrollbarState,
     show_popup: bool,
     popup_content: Vec<(String, String)>,
 }
@@ -333,6 +334,7 @@ impl App {
             audience: load_audience()?,
             selected_index: 0,
             scroll_offset: 0,
+            scrollbar_state: ScrollbarState::default(),
             show_popup: false,
             popup_content: Vec::new(),
         })
@@ -342,6 +344,7 @@ impl App {
         self.datasource = datasource;
         self.selected_index = 0;
         self.scroll_offset = 0;
+        self.scrollbar_state = ScrollbarState::default();
     }
 
     fn filtered_items(&self) -> Vec<Vec<String>> {
@@ -516,6 +519,13 @@ impl App {
             // Scrolling down
             self.scroll_offset = self.selected_index.saturating_sub(viewport_height - 1);
         }
+
+        // Sync scrollbar state
+        let total_items = self.filtered_items().len();
+        self.scrollbar_state = self.scrollbar_state
+            .content_length(total_items)
+            .viewport_content_length(viewport_height)
+            .position(self.scroll_offset);
     }
 
     fn handle_key(&mut self, key: KeyEvent, viewport_height: usize) -> bool {
@@ -547,11 +557,13 @@ impl App {
                 self.filter_input.push(c);
                 self.selected_index = 0;
                 self.scroll_offset = 0;
+                self.scrollbar_state = ScrollbarState::default();
             }
             KeyCode::Backspace => {
                 self.filter_input.pop();
                 self.selected_index = 0;
                 self.scroll_offset = 0;
+                self.scrollbar_state = ScrollbarState::default();
             }
             KeyCode::Down => {
                 let item_count = self.filtered_items().len();
@@ -688,6 +700,21 @@ fn ui(frame: &mut Frame, app: &App) {
         .column_spacing(1);
 
     frame.render_widget(table, chunks[2]);
+
+    // Render scrollbar
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"))
+        .thumb_symbol("█")
+        .track_symbol(Some("│"))
+        .thumb_style(Style::default().fg(app.datasource.color()))
+        .track_style(Style::default().fg(Color::DarkGray));
+
+    let mut scrollbar_state = ScrollbarState::default()
+        .content_length(total_count)
+        .viewport_content_length(table_height as usize)
+        .position(app.scroll_offset);
+    frame.render_stateful_widget(scrollbar, chunks[2], &mut scrollbar_state);
 
     // Help bar
     let help_text = if app.show_popup {
