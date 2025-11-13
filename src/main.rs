@@ -247,6 +247,14 @@ impl Datasource {
         }
     }
 
+    fn bright_color(self) -> Color {
+        match self {
+            Datasource::Product => Color::LightYellow,
+            Datasource::Content => Color::LightCyan,
+            Datasource::Audience => Color::LightRed,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Datasource::Product => "Product",
@@ -642,10 +650,10 @@ fn ui(frame: &mut Frame, app: &App) {
     let headers = app.column_headers();
     let header_cells: Vec<Cell> = headers
         .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(app.datasource.color()).bold()))
+        .map(|h| Cell::from(*h).style(Style::default().fg(Color::White)))
         .collect();
     let header = Row::new(header_cells)
-        .style(Style::default().bg(Color::DarkGray))
+        .style(Style::default().bg(Color::Rgb(40, 40, 40)).bold().underlined())
         .height(1);
 
     // Calculate viewport height (table area minus borders and header)
@@ -662,8 +670,9 @@ fn ui(frame: &mut Frame, app: &App) {
             let cells: Vec<Cell> = row_data.into_iter().map(|c| Cell::from(c)).collect();
             let style = if i == app.selected_index {
                 Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
+                    .fg(app.datasource.bright_color())
+                    .bg(Color::Rgb(30, 30, 30))
+                    .bold()
             } else {
                 Style::default().fg(Color::Gray)
             };
