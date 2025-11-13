@@ -17,6 +17,6 @@ panic = "abort"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
-ratatui = "0.29"
+ratatui = { version = "0.30.0-beta.0", features = ["layout-cache"] }
 crossterm = "0.29"
 csv = "1.3"

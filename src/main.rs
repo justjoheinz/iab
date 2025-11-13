@@ -1,16 +1,12 @@
 use anyhow::*;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     prelude::*,
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Tabs},
+    DefaultTerminal,
 };
 use serde::{Deserialize, Serialize};
-use std::io::{stdout, Stdout};
 
 const PRODUCT_TSV: &str = include_str!("../product-2.0.tsv");
 const CONTENT_TSV: &str = include_str!("../content-3.1.tsv");
@@ -608,15 +604,13 @@ fn ui(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     // Split into sections: header, filter, list, help
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header with datasource tabs
-            Constraint::Length(3), // Filter input
-            Constraint::Min(0),     // List
-            Constraint::Length(1),  // Help bar
-        ])
-        .split(area);
+    let layout = Layout::vertical([
+        Constraint::Length(3), // Header with datasource tabs
+        Constraint::Length(3), // Filter input
+        Constraint::Min(0),     // List
+        Constraint::Length(1),  // Help bar
+    ]);
+    let chunks: [Rect; 4] = area.layout(&layout);
 
     // Header with datasource tabs
     let tabs = Tabs::new(vec!["Product", "Content", "Audience"])
@@ -728,17 +722,7 @@ fn render_popup(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     // Create centered popup (60% width, 80% height)
-    let popup_width = (area.width * 60) / 100;
-    let popup_height = (area.height * 80) / 100;
-    let popup_x = (area.width - popup_width) / 2;
-    let popup_y = (area.height - popup_height) / 2;
-
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    let popup_area = Rect::centered(area, Constraint::Percentage(60), Constraint::Percentage(80));
 
     // Clear the background
     frame.render_widget(Clear, popup_area);
@@ -783,7 +767,7 @@ fn render_popup(frame: &mut Frame, app: &App) {
     frame.render_widget(paragraph, inner_area);
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> Result<()> {
+fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     loop {
         terminal.draw(|frame| ui(frame, &app))?;
 
@@ -804,20 +788,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> R
 }
 
 fn main() -> Result<()> {
-    // Initialize terminal
-    enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-
-    // Load data and create app
-    let app = App::new()?;
-
-    // Run TUI
-    let result = run_app(&mut terminal, app);
-
-    // Cleanup terminal
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
-
-    result
+    ratatui::run(|terminal| {
+        let app = App::new()?;
+        run_app(terminal, app)
+    })
 }
