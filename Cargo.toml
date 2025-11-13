@@ -20,3 +20,4 @@ anyhow = "1"
 ratatui = { version = "0.30.0-beta.0", features = ["layout-cache"] }
 crossterm = "0.29"
 csv = "1.3"
+tui-tree-widget = { path = "../tui-rs-tree-widget" }

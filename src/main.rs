@@ -3,10 +3,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::{
     prelude::*,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Tabs},
+    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs},
     DefaultTerminal,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use tui_tree_widget::{Tree, TreeItem, TreeState};
 
 const PRODUCT_TSV: &str = include_str!("../product-2.0.tsv");
 const CONTENT_TSV: &str = include_str!("../content-3.1.tsv");
@@ -329,24 +331,23 @@ struct App {
     products: Vec<Product>,
     content: Vec<Content>,
     audience: Vec<Audience>,
-    selected_index: usize,
-    scroll_offset: usize,
-    scrollbar_state: ScrollbarState,
+    tree_state: TreeState<String>,
     show_popup: bool,
     popup_content: Vec<(String, String)>,
 }
 
 impl App {
     fn new() -> Result<Self> {
+        let mut tree_state = TreeState::default();
+        tree_state.select_first();
+
         Ok(Self {
             datasource: Datasource::Product,
             filter_input: String::new(),
             products: load_products()?,
             content: load_content()?,
             audience: load_audience()?,
-            selected_index: 0,
-            scroll_offset: 0,
-            scrollbar_state: ScrollbarState::default(),
+            tree_state,
             show_popup: false,
             popup_content: Vec::new(),
         })
@@ -354,33 +355,110 @@ impl App {
 
     fn switch_datasource(&mut self, datasource: Datasource) {
         self.datasource = datasource;
-        self.selected_index = 0;
-        self.scroll_offset = 0;
-        self.scrollbar_state = ScrollbarState::default();
+        self.tree_state = TreeState::default();
+        self.tree_state.select_first();
+        if !self.filter_input.is_empty() {
+            self.expand_filtered_nodes();
+        }
     }
 
-    fn filtered_items(&self) -> Vec<Vec<String>> {
+    fn filtered_tree_items(&self) -> Vec<TreeItem<'static, String>> {
         let filter_lower = self.filter_input.to_lowercase();
 
+        // If no filter, build full tree
+        if filter_lower.is_empty() {
+            return match self.datasource {
+                Datasource::Product => build_tree_items(&self.products, ""),
+                Datasource::Content => build_tree_items(&self.content, ""),
+                Datasource::Audience => build_tree_items(&self.audience, ""),
+            };
+        }
+
+        // Filter items and build tree with full path + descendants
         match self.datasource {
-            Datasource::Product => self
-                .products
-                .iter()
-                .filter(|item| self.matches_all_fields(item, &filter_lower))
-                .map(|item| self.format_item_as_row(item))
-                .collect(),
-            Datasource::Content => self
-                .content
-                .iter()
-                .filter(|item| self.matches_all_fields(item, &filter_lower))
-                .map(|item| self.format_item_as_row(item))
-                .collect(),
-            Datasource::Audience => self
-                .audience
-                .iter()
-                .filter(|item| self.matches_all_fields(item, &filter_lower))
-                .map(|item| self.format_item_as_row(item))
-                .collect(),
+            Datasource::Product => self.filtered_tree_from_items(&self.products, &filter_lower),
+            Datasource::Content => self.filtered_tree_from_items(&self.content, &filter_lower),
+            Datasource::Audience => self.filtered_tree_from_items(&self.audience, &filter_lower),
+        }
+    }
+
+    fn filtered_tree_from_items<T: TaxonomyItem + Clone>(&self, items: &[T], filter_lower: &str) -> Vec<TreeItem<'static, String>> {
+        // Find all matching items
+        let matching_ids: HashSet<String> = items
+            .iter()
+            .filter(|item| self.matches_all_fields(*item, filter_lower))
+            .map(|item| item.unique_id().to_string())
+            .collect();
+
+        if matching_ids.is_empty() {
+            return vec![];
+        }
+
+        // Build parent map for ancestor lookup
+        let parent_map: HashMap<String, Option<String>> = items
+            .iter()
+            .map(|item| (item.unique_id().to_string(), item.parent().map(|s| s.to_string())))
+            .collect();
+
+        // Collect all IDs to include: matches + all ancestors + all descendants
+        let mut included_ids: HashSet<String> = HashSet::new();
+
+        // Add matches
+        included_ids.extend(matching_ids.iter().cloned());
+
+        // Add all ancestors of matches
+        for match_id in &matching_ids {
+            let mut current_id = match_id.clone();
+            let mut visited = HashSet::new();
+            while let Some(Some(parent_id)) = parent_map.get(&current_id) {
+                // Prevent infinite loop on circular references
+                if visited.contains(&current_id) {
+                    break;
+                }
+                visited.insert(current_id.clone());
+                included_ids.insert(parent_id.clone());
+                current_id = parent_id.clone();
+            }
+        }
+
+        // Add all descendants of matches
+        for match_id in &matching_ids {
+            self.add_all_descendants(match_id, items, &mut included_ids);
+        }
+
+        // Filter items to only included IDs
+        let filtered_items: Vec<T> = items
+            .iter()
+            .filter(|item| included_ids.contains(item.unique_id()))
+            .cloned()
+            .collect();
+
+        // Build tree from filtered items
+        build_tree_items(&filtered_items, filter_lower)
+    }
+
+    fn add_all_descendants<T: TaxonomyItem>(&self, parent_id: &str, items: &[T], included_ids: &mut HashSet<String>) {
+        for item in items {
+            if let Some(item_parent) = item.parent() {
+                if item_parent == parent_id {
+                    let child_id = item.unique_id().to_string();
+                    // Prevent infinite recursion on circular references
+                    if !included_ids.contains(&child_id) {
+                        included_ids.insert(child_id.clone());
+                        self.add_all_descendants(&child_id, items, included_ids);
+                    }
+                }
+            }
+        }
+    }
+
+    fn expand_filtered_nodes(&mut self) {
+        if !self.filter_input.is_empty() {
+            let tree_items = self.filtered_tree_items();
+            let all_paths = collect_all_tree_paths(&tree_items, vec![]);
+            for path in all_paths {
+                self.tree_state.open(path);
+            }
         }
     }
 
@@ -389,14 +467,14 @@ impl App {
             return true;
         }
 
-        // Search in unique_id (starts with)
-        if item.unique_id().to_lowercase().starts_with(filter_lower) {
+        // Search in unique_id (exact match)
+        if item.unique_id().to_lowercase() == filter_lower {
             return true;
         }
 
-        // Search in parent (starts with)
+        // Search in parent (exact match)
         if let Some(parent) = item.parent() {
-            if parent.to_lowercase().starts_with(filter_lower) {
+            if parent.to_lowercase() == filter_lower {
                 return true;
             }
         }
@@ -423,73 +501,43 @@ impl App {
         false
     }
 
-    fn format_item_as_row<T: TaxonomyItem>(&self, item: &T) -> Vec<String> {
-        let tiers = item.tiers().join(" > ");
-        let parent = item.parent().unwrap_or("").to_string();
-        let ext = item.extension().unwrap_or("").to_string();
-
-        vec![
-            item.unique_id().to_string(),
-            parent,
-            item.name().to_string(),
-            tiers,
-            ext,
-        ]
-    }
-
-    fn column_headers(&self) -> Vec<&str> {
-        match self.datasource {
-            Datasource::Product => vec!["ID", "Parent", "Name", "Tiers", ""],
-            Datasource::Content => vec!["ID", "Parent", "Name", "Tiers", "Ext"],
-            Datasource::Audience => vec!["ID", "Parent", "Name", "Tiers", "Ext"],
-        }
-    }
-
-    fn column_widths(&self) -> Vec<Constraint> {
-        vec![
-            Constraint::Length(10),  // ID
-            Constraint::Length(10),  // Parent
-            Constraint::Min(20),     // Name (flexible)
-            Constraint::Min(20),     // Tiers (flexible)
-            Constraint::Length(10),  // Extension
-        ]
-    }
-
     fn show_item_details(&mut self) {
-        let filter_lower = self.filter_input.to_lowercase();
+        // Get the selected item's unique ID from the tree state
+        let selected_path = self.tree_state.selected();
+        let selected_id = match selected_path.last() {
+            Some(id) => id,
+            None => return,
+        };
 
         let details = match self.datasource {
             Datasource::Product => {
-                let filtered: Vec<&Product> = self.products
+                let item = self.products
                     .iter()
-                    .filter(|item| self.matches_all_fields(*item, &filter_lower))
-                    .collect();
+                    .find(|item| item.unique_id() == selected_id);
 
-                if let Some(item) = filtered.get(self.selected_index) {
+                if let Some(item) = item {
                     self.format_item_details(item)
                 } else {
                     return;
                 }
             }
             Datasource::Content => {
-                let filtered: Vec<&Content> = self.content
+                let item = self.content
                     .iter()
-                    .filter(|item| self.matches_all_fields(*item, &filter_lower))
-                    .collect();
+                    .find(|item| item.unique_id() == selected_id);
 
-                if let Some(item) = filtered.get(self.selected_index) {
+                if let Some(item) = item {
                     self.format_item_details(item)
                 } else {
                     return;
                 }
             }
             Datasource::Audience => {
-                let filtered: Vec<&Audience> = self.audience
+                let item = self.audience
                     .iter()
-                    .filter(|item| self.matches_all_fields(*item, &filter_lower))
-                    .collect();
+                    .find(|item| item.unique_id() == selected_id);
 
-                if let Some(item) = filtered.get(self.selected_index) {
+                if let Some(item) = item {
                     self.format_item_details(item)
                 } else {
                     return;
@@ -522,25 +570,7 @@ impl App {
         details
     }
 
-    fn update_scroll(&mut self, viewport_height: usize) {
-        // Ensure selected item is visible within viewport
-        if self.selected_index < self.scroll_offset {
-            // Scrolling up
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + viewport_height {
-            // Scrolling down
-            self.scroll_offset = self.selected_index.saturating_sub(viewport_height - 1);
-        }
-
-        // Sync scrollbar state
-        let total_items = self.filtered_items().len();
-        self.scrollbar_state = self.scrollbar_state
-            .content_length(total_items)
-            .viewport_content_length(viewport_height)
-            .position(self.scroll_offset);
-    }
-
-    fn handle_key(&mut self, key: KeyEvent, viewport_height: usize) -> bool {
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
         // Handle popup-specific keys first
         if self.show_popup {
             match key.code {
@@ -565,41 +595,42 @@ impl App {
                     self.switch_datasource(self.datasource.next());
                 }
             }
+            KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.tree_state.toggle_selected();
+            }
             KeyCode::Char(c) => {
                 self.filter_input.push(c);
-                self.selected_index = 0;
-                self.scroll_offset = 0;
-                self.scrollbar_state = ScrollbarState::default();
+                self.tree_state = TreeState::default();
+                self.tree_state.select_first();
+                self.expand_filtered_nodes();
             }
             KeyCode::Backspace => {
                 self.filter_input.pop();
-                self.selected_index = 0;
-                self.scroll_offset = 0;
-                self.scrollbar_state = ScrollbarState::default();
+                self.tree_state = TreeState::default();
+                self.tree_state.select_first();
+                self.expand_filtered_nodes();
             }
             KeyCode::Down => {
-                let item_count = self.filtered_items().len();
-                if item_count > 0 && self.selected_index < item_count - 1 {
-                    self.selected_index += 1;
-                    self.update_scroll(viewport_height);
-                }
+                self.tree_state.key_down();
             }
             KeyCode::Up => {
-                if self.selected_index > 0 {
-                    self.selected_index -= 1;
-                    self.update_scroll(viewport_height);
-                }
+                self.tree_state.key_up();
+            }
+            KeyCode::Left => {
+                self.tree_state.key_left();
+            }
+            KeyCode::Right => {
+                self.tree_state.key_right();
             }
             KeyCode::PageDown => {
-                let item_count = self.filtered_items().len();
-                if item_count > 0 {
-                    self.selected_index = (self.selected_index + 10).min(item_count - 1);
-                    self.update_scroll(viewport_height);
+                for _ in 0..10 {
+                    self.tree_state.key_down();
                 }
             }
             KeyCode::PageUp => {
-                self.selected_index = self.selected_index.saturating_sub(10);
-                self.update_scroll(viewport_height);
+                for _ in 0..10 {
+                    self.tree_state.key_up();
+                }
             }
             _ => {}
         }
@@ -607,8 +638,180 @@ impl App {
     }
 }
 
+// Tree building helpers
+fn build_tree_items<T: TaxonomyItem>(items: &[T], filter: &str) -> Vec<TreeItem<'static, String>> {
+    let mut children_map: HashMap<Option<String>, Vec<&T>> = HashMap::new();
+
+    // Group items by parent
+    for item in items {
+        // Treat self-references as root nodes
+        let parent_key = match item.parent() {
+            Some(p) if p == item.unique_id() => None,
+            Some(p) => Some(p.to_string()),
+            None => None,
+        };
+        children_map.entry(parent_key).or_default().push(item);
+    }
+
+    // Build tree starting from root nodes (no parent)
+    build_tree_recursive(&children_map, None, filter)
+}
+
+fn build_tree_recursive<'a, T: TaxonomyItem>(
+    children_map: &HashMap<Option<String>, Vec<&'a T>>,
+    parent_id: Option<String>,
+    filter: &str,
+) -> Vec<TreeItem<'static, String>> {
+    let children = match children_map.get(&parent_id) {
+        Some(children) => children,
+        None => return vec![],
+    };
+
+    children.iter().map(|item| {
+        let id = item.unique_id().to_string();
+        let name = item.name().to_string();
+        let node_children = build_tree_recursive(children_map, Some(id.clone()), filter);
+
+        // Format: [bold ID] name with highlighted matches
+        let mut display_spans = Vec::new();
+        // Add highlighted ID spans with bold style
+        for span in highlight_match(&id, filter) {
+            display_spans.push(Span::styled(span.content.to_string(), span.style.bold()));
+        }
+        display_spans.push(Span::raw(" "));
+        // Add highlighted name spans
+        display_spans.extend(highlight_match(&name, filter));
+        let display_text = Line::from(display_spans);
+
+        TreeItem::new(id.clone(), display_text, node_children)
+            .expect("Failed to create tree item")
+    }).collect()
+}
+
+fn count_tree_items(items: &[TreeItem<String>]) -> usize {
+    items.iter().map(|item| {
+        1 + count_tree_items(item.children())
+    }).sum()
+}
+
+fn collect_all_tree_paths(items: &[TreeItem<String>], current_path: Vec<String>) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for item in items {
+        let mut path = current_path.clone();
+        path.push(item.identifier().clone());
+        paths.push(path.clone());
+        // Recursively collect child paths
+        paths.extend(collect_all_tree_paths(item.children(), path));
+    }
+    paths
+}
+
+fn highlight_match(text: &str, filter: &str) -> Vec<Span<'static>> {
+    if filter.is_empty() {
+        return vec![Span::raw(text.to_string())];
+    }
+
+    let text_lower = text.to_lowercase();
+    let filter_lower = filter.to_lowercase();
+
+    // Find match position
+    if let Some(pos) = text_lower.find(&filter_lower) {
+        let mut spans = Vec::new();
+        if pos > 0 {
+            spans.push(Span::raw(text[..pos].to_string()));
+        }
+        let end = pos + filter.len();
+        spans.push(Span::styled(
+            text[pos..end].to_string(),
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        ));
+        if end < text.len() {
+            spans.push(Span::raw(text[end..].to_string()));
+        }
+        spans
+    } else {
+        vec![Span::raw(text.to_string())]
+    }
+}
+
+fn calculate_flat_index(
+    items: &[TreeItem<String>],
+    tree_state: &TreeState<String>,
+    current_path: Vec<String>,
+) -> Option<usize> {
+    let selected = tree_state.selected();
+    let opened = tree_state.opened();
+    let mut index = 0;
+
+    for item in items {
+        let mut item_path = current_path.clone();
+        item_path.push(item.identifier().clone());
+
+        // Check if this is the selected item
+        if item_path == selected {
+            return Some(index);
+        }
+
+        index += 1;
+
+        // If this node is opened, recursively check children
+        if opened.contains(&item_path) {
+            if let Some(child_index) = calculate_flat_index(item.children(), tree_state, item_path) {
+                return Some(index + child_index);
+            }
+            // Count all visible children
+            index += count_visible_items(item.children(), opened, &current_path, item.identifier());
+        }
+    }
+
+    None
+}
+
+fn count_visible_items(
+    items: &[TreeItem<String>],
+    opened: &HashSet<Vec<String>>,
+    parent_path: &[String],
+    current_id: &str,
+) -> usize {
+    let mut count = 0;
+    for item in items {
+        count += 1; // Count this item
+
+        let mut item_path = parent_path.to_vec();
+        item_path.push(current_id.to_string());
+        item_path.push(item.identifier().clone());
+
+        // If opened, count children too
+        if opened.contains(&item_path) {
+            count += count_visible_items(item.children(), opened, &item_path[..item_path.len()-1], item.identifier());
+        }
+    }
+    count
+}
+
+fn count_visible_tree_items(
+    items: &[TreeItem<String>],
+    tree_state: &TreeState<String>,
+) -> usize {
+    let opened = tree_state.opened();
+    let mut count = 0;
+
+    for item in items {
+        count += 1; // Count this item
+
+        let item_path = vec![item.identifier().clone()];
+
+        // If opened, count children too
+        if opened.contains(&item_path) {
+            count += count_visible_items(item.children(), opened, &[], item.identifier());
+        }
+    }
+
+    count
+}
+
 // TUI rendering
-fn ui(frame: &mut Frame, app: &App) {
+fn ui(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
     // Split into sections: header, filter, list, help
@@ -643,58 +846,30 @@ fn ui(frame: &mut Frame, app: &App) {
 
     frame.render_widget(filter, chunks[1]);
 
-    // Table of filtered items
-    let filtered = app.filtered_items();
-    let total_count = filtered.len();
+    // Tree of filtered items
+    let tree_items = app.filtered_tree_items();
+    let total_count = count_tree_items(&tree_items);
 
-    let headers = app.column_headers();
-    let header_cells: Vec<Cell> = headers
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::White)))
-        .collect();
-    let header = Row::new(header_cells)
-        .style(Style::default().bg(Color::Rgb(40, 40, 40)).bold().underlined())
-        .height(1);
+    let title = format!("Results ({} items)", total_count);
 
-    // Calculate viewport height (table area minus borders and header)
-    let table_height = chunks[2].height.saturating_sub(3); // 2 for borders, 1 for header
-    let viewport_end = (app.scroll_offset + table_height as usize).min(total_count);
-
-    // Only show rows within the viewport
-    let rows: Vec<Row> = filtered
-        .into_iter()
-        .enumerate()
-        .skip(app.scroll_offset)
-        .take(table_height as usize)
-        .map(|(i, row_data)| {
-            let cells: Vec<Cell> = row_data.into_iter().map(|c| Cell::from(c)).collect();
-            let style = if i == app.selected_index {
-                Style::default()
-                    .fg(app.datasource.bright_color())
-                    .bg(Color::Rgb(30, 30, 30))
-                    .bold()
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            Row::new(cells).style(style).height(1)
-        }).collect();
-
-    let title = if total_count == 0 {
-        "Results (0 items)".to_string()
-    } else {
-        format!("Results ({} items, showing {}-{})", total_count, app.scroll_offset + 1, viewport_end)
-    };
-
-    let table = Table::new(rows, app.column_widths())
-        .header(header)
+    let tree = Tree::new(&tree_items)
+        .expect("Failed to create tree widget")
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(title),
         )
-        .column_spacing(1);
+        .highlight_style(
+            Style::default()
+                .fg(app.datasource.bright_color())
+                .bg(Color::Rgb(30, 30, 30))
+                .bold()
+        )
+        .node_closed_symbol("▶ ")
+        .node_open_symbol("▼ ")
+        .node_no_children_symbol("  ");
 
-    frame.render_widget(table, chunks[2]);
+    frame.render_stateful_widget(tree, chunks[2], &mut app.tree_state);
 
     // Render scrollbar
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -705,17 +880,22 @@ fn ui(frame: &mut Frame, app: &App) {
         .thumb_style(Style::default().fg(app.datasource.color()))
         .track_style(Style::default().fg(Color::DarkGray));
 
+    let viewport_height = chunks[2].height.saturating_sub(2) as usize; // Subtract borders
+    let scroll_position = calculate_flat_index(&tree_items, &app.tree_state, vec![]).unwrap_or(0);
+    let visible_count = count_visible_tree_items(&tree_items, &app.tree_state);
+
     let mut scrollbar_state = ScrollbarState::default()
-        .content_length(total_count)
-        .viewport_content_length(table_height as usize)
-        .position(app.scroll_offset);
+        .content_length(visible_count)
+        .viewport_content_length(viewport_height)
+        .position(scroll_position);
+
     frame.render_stateful_widget(scrollbar, chunks[2], &mut scrollbar_state);
 
     // Help bar
     let help_text = if app.show_popup {
         "ESC/Enter: Close | q: Quit"
     } else {
-        "Tab/Shift+Tab: Switch datasource | ↑↓: Navigate | Enter: View details | ESC/q: Quit"
+        "Tab/Shift+Tab: Switch | ↑↓: Navigate | ←→: Collapse/Expand | Ctrl+Space: Toggle | Enter: Details | ESC/q: Quit"
     };
     let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
 
@@ -778,16 +958,12 @@ fn render_popup(frame: &mut Frame, app: &App) {
 
 fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     loop {
-        terminal.draw(|frame| ui(frame, &app))?;
+        terminal.draw(|frame| ui(frame, &mut app))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    // Calculate viewport height: terminal height minus header(3), filter(3), help(1), borders
-                    let terminal_height = terminal.size()?.height;
-                    let viewport_height = terminal_height.saturating_sub(7 + 3) as usize; // 7 for UI chrome, 3 for table borders/header
-
-                    if !app.handle_key(key, viewport_height) {
+                    if !app.handle_key(key) {
                         return Ok(());
                     }
                 }
