@@ -595,9 +595,6 @@ impl App {
                     self.switch_datasource(self.datasource.next());
                 }
             }
-            KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.tree_state.toggle_selected();
-            }
             KeyCode::Char(c) => {
                 self.filter_input.push(c);
                 self.tree_state = TreeState::default();
@@ -895,7 +892,7 @@ fn ui(frame: &mut Frame, app: &mut App) {
     let help_text = if app.show_popup {
         "ESC/Enter: Close | q: Quit"
     } else {
-        "Tab/Shift+Tab: Switch | ↑↓: Navigate | ←→: Collapse/Expand | Ctrl+Space: Toggle | Enter: Details | ESC/q: Quit"
+        "Tab/Shift+Tab: Switch | ↑↓: Navigate | ←→: Collapse/Expand | Enter: Details | ESC/q: Quit"
     };
     let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
 
