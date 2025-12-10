@@ -574,9 +574,12 @@ impl App {
         // Handle popup-specific keys first
         if self.show_popup {
             match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                KeyCode::Esc | KeyCode::Enter => {
                     self.show_popup = false;
-                    return key.code != KeyCode::Char('q');
+                    return true;
+                }
+                KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return false;
                 }
                 _ => return true,
             }
@@ -584,7 +587,8 @@ impl App {
 
         // Handle normal navigation
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return false,
+            KeyCode::Esc => return false,
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
             KeyCode::Enter => {
                 self.show_item_details();
             }
@@ -890,9 +894,9 @@ fn ui(frame: &mut Frame, app: &mut App) {
 
     // Help bar
     let help_text = if app.show_popup {
-        "ESC/Enter: Close | q: Quit"
+        "ESC/Enter: Close | Ctrl-q: Quit"
     } else {
-        "Tab/Shift+Tab: Switch | ↑↓: Navigate | ←→: Collapse/Expand | Enter: Details | ESC/q: Quit"
+        "Tab/Shift+Tab: Switch | ↑↓: Navigate | ←→: Collapse/Expand | Enter: Details | ESC/Ctrl-q: Quit"
     };
     let help = Paragraph::new(help_text).style(Style::default().fg(Color::DarkGray));
 
